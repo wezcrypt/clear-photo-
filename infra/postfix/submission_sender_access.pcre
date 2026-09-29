@@ -1,0 +1,1 @@
+# Accept only VoidMail VERP bounce senders; the domain part is appended by entrypoint.sh.

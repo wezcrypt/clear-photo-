@@ -1,0 +1,66 @@
+# Production overlay:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Read DEPLOYMENT.md first. Requires: DNS records, open ports 25/80/443, a DKIM key, and a filled-in .env.
+services:
+  api:
+    environment:
+      NODE_ENV: production
+      TRUST_PROXY: "true"
+      RATE_LIMIT_MULTIPLIER: "1"
+      DKIM_PRIVATE_KEY_FILE: /run/secrets/dkim.pem
+    ports: !reset []
+    secrets: [dkim.pem]
+  mx:
+    environment:
+      NODE_ENV: production
+  worker:
+    environment:
+      NODE_ENV: production
+      DKIM_PRIVATE_KEY_FILE: /run/secrets/dkim.pem
+    secrets: [dkim.pem]
+  migrate:
+    environment:
+      NODE_ENV: production
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      WEB_HOST: ${WEB_HOST}
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME}
+      MAIL_DOMAIN: ${MAIL_DOMAIN}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./infra/caddy/mta-sts.txt:/srv/mta-sts/.well-known/mta-sts.txt:ro
+      - caddydata:/data
+    networks: [frontend]
+    depends_on: [api]
+
+  postfix:
+    environment:
+      DEFAULT_TRANSPORT: smtp
+      TLSREQ_TRANSPORT: "smtp_tlsreq:"
+      # verify = CA-validated certificate matching the MX name. Use "dane" if you run a DNSSEC-validating resolver.
+      TLSREQ_LEVEL: verify
+      EXTRA_TRANSPORTS: ""
+      TLS_CERT_FILE: /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${MAIL_HOSTNAME}/${MAIL_HOSTNAME}.crt
+      TLS_KEY_FILE: /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${MAIL_HOSTNAME}/${MAIL_HOSTNAME}.key
+    ports: !override ["25:25"]
+    volumes:
+      - caddydata:/caddy:ro
+    networks:
+      backend: {}
+      submission: { ipv4_address: 172.30.1.10 }
+      external: {}
+
+  # Development-only services are disabled in production.
+  mailpit: { profiles: ["dev"] }
+  mailpit-tls: { profiles: ["dev"] }
+  certs: { profiles: ["dev"] }
+
+secrets:
+  dkim.pem:
+    file: ./secrets/dkim.pem
+
+volumes:
+  caddydata: {}

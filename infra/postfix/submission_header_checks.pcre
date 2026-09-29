@@ -1,0 +1,3 @@
+# The worker hop is internal; do not publish internal addresses in a Received header.
+/^Received:/ IGNORE
+/^X-Originating-IP:/ IGNORE

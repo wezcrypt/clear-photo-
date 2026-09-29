@@ -1,0 +1,19 @@
+
+# ---- VoidMail additions ----
+# Internal submission listener for the outbound worker only. mynetworks restricts who can connect;
+# only VERP bounce senders of our own domain are accepted as envelope senders.
+10025      inet  n       -       n       -       -       smtpd
+  -o syslog_name=postfix/submission-internal
+  -o smtpd_client_restrictions=permit_mynetworks,reject
+  -o smtpd_helo_restrictions=
+  -o smtpd_sender_restrictions=check_sender_access,pcre:/etc/postfix/submission_sender_access.pcre,reject
+  -o smtpd_relay_restrictions=permit_mynetworks,reject
+  -o smtpd_recipient_restrictions=permit_mynetworks,reject
+  -o smtpd_tls_security_level=none
+  -o cleanup_service_name=subcleanup
+subcleanup unix  n       -       n       -       0       cleanup
+  -o header_checks=pcre:/etc/postfix/submission_header_checks.pcre
+# Mandatory-TLS delivery transport ("Require TLS" sending mode).
+smtp_tlsreq unix -       -       n       -       -       smtp
+  -o syslog_name=postfix/smtp-tlsreq
+  -o smtp_tls_security_level=${TLSREQ_LEVEL}

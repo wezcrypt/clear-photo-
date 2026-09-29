@@ -1,0 +1,18 @@
+# Web app. Caddy obtains and renews Let's Encrypt certificates automatically.
+{$WEB_HOST} {
+	encode zstd gzip
+	reverse_proxy api:8080
+	header -Server
+	# Access logging is intentionally not enabled (see PRIVACY.md). Enable only with a documented reason and retention.
+}
+
+# Certificate for the MX hostname (used by Postfix for STARTTLS); nothing is served here.
+{$MAIL_HOSTNAME} {
+	respond 404
+}
+
+# MTA-STS policy (RFC 8461).
+mta-sts.{$MAIL_DOMAIN} {
+	root * /srv/mta-sts
+	file_server
+}

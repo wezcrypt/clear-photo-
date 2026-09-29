@@ -1,0 +1,67 @@
+# Rendered by entrypoint.sh. Variables: ${MAIL_DOMAIN} ${MAIL_HOSTNAME} ${SUBMISSION_NETWORK} ${MX_BRIDGE_HOST}
+#                                      ${DEFAULT_TRANSPORT} ${TLSREQ_TRANSPORT} ${TLSREQ_LEVEL} ${EXTRA_TRANSPORTS}
+compatibility_level = 3.6
+maillog_file = /dev/stdout
+myhostname = ${MAIL_HOSTNAME}
+mydomain = ${MAIL_DOMAIN}
+myorigin = $mydomain
+inet_interfaces = all
+inet_protocols = ipv4
+smtpd_banner = $myhostname ESMTP
+smtputf8_enable = yes
+
+# No local delivery at all: every VoidMail recipient goes to the inbound bridge over LMTP.
+mydestination =
+local_recipient_maps =
+local_transport = error:5.1.1 local delivery disabled
+alias_maps =
+alias_database =
+
+# Only the outbound worker's private network may submit mail (listener on 10025, see master.cf).
+mynetworks = 127.0.0.0/8 ${SUBMISSION_NETWORK}
+
+# Accept inbound only for our domain and only for recipients that exist (checked live against the database).
+relay_domains = ${MAIL_DOMAIN}
+relay_recipient_maps = tcp:${MX_BRIDGE_HOST}:2425
+transport_maps = inline:{ { ${MAIL_DOMAIN} = lmtp:inet:${MX_BRIDGE_HOST}:2424 } ${EXTRA_TRANSPORTS} }
+
+# Port 25 never relays, for anyone, including mynetworks.
+smtpd_relay_restrictions = reject_unauth_destination
+smtpd_recipient_restrictions = reject_non_fqdn_recipient, reject_unauth_destination
+smtpd_helo_required = yes
+disable_vrfy_command = yes
+smtpd_delay_reject = yes
+smtpd_client_connection_rate_limit = 60
+smtpd_client_message_rate_limit = 120
+anvil_rate_time_unit = 60s
+message_size_limit = 36700160
+mailbox_size_limit = 0
+lmtp_destination_recipient_limit = 50
+
+# Inbound TLS (opportunistic, as required for public MX).
+smtpd_tls_security_level = may
+smtpd_tls_cert_file = /etc/postfix/tls/cert.pem
+smtpd_tls_key_file = /etc/postfix/tls/key.pem
+smtpd_tls_mandatory_protocols = >=TLSv1.2
+smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_loglevel = 1
+
+# Outbound: opportunistic TLS by default ...
+smtp_tls_security_level = may
+smtp_tls_protocols = >=TLSv1.2
+smtp_tls_loglevel = 1
+smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
+default_transport = ${DEFAULT_TRANSPORT}
+# ... and mandatory TLS for messages sent in "Require TLS" mode (envelope sender bounces+<id>.tls@domain).
+sender_dependent_default_transport_maps = pcre:/etc/postfix/sender_transport.pcre
+
+# Queue, retry and bounce policy (conservative; see OPERATIONS.md).
+maximal_queue_lifetime = 5d
+bounce_queue_lifetime = 5d
+delay_warning_time = 4h
+minimal_backoff_time = 300s
+maximal_backoff_time = 4000s
+hopcount_limit = 30
+bounce_size_limit = 50000
+notify_classes = resource, software
+smtpd_discard_ehlo_keywords = etrn

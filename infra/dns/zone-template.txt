@@ -1,0 +1,24 @@
+; VoidMail DNS template. Replace example.com / 203.0.113.10 / selector. Keep TTLs low while testing.
+; See DEPLOYMENT.md for the order of operations.
+
+example.com.                 3600 IN MX  10 mx.example.com.
+mx.example.com.              3600 IN A   203.0.113.10
+mail.example.com.            3600 IN A   203.0.113.10      ; web app (WEB_HOST)
+mta-sts.example.com.         3600 IN A   203.0.113.10
+
+; SPF: only this server may send for the domain. Hard fail once verified.
+example.com.                 3600 IN TXT "v=spf1 mx -all"
+
+; DKIM: output of ops/gen-dkim.sh (selector vm1)
+vm1._domainkey.example.com.  3600 IN TXT "v=DKIM1; k=rsa; p=<PUBLIC KEY FROM ops/gen-dkim.sh>"
+
+; DMARC: start with p=none + reports, move to quarantine/reject after reviewing reports.
+_dmarc.example.com.          3600 IN TXT "v=DMARC1; p=none; rua=mailto:postmaster@example.com; adkim=s; aspf=s; fo=1"
+
+; MTA-STS (RFC 8461) and TLS reporting (RFC 8460). Change id= whenever the policy file changes.
+_mta-sts.example.com.        3600 IN TXT "v=STSv1; id=20260101T000000"
+_smtp._tls.example.com.      3600 IN TXT "v=TLSRPTv1; rua=mailto:postmaster@example.com"
+
+; PTR / reverse DNS: set at your hosting provider (not in this zone):
+;   203.0.113.10  ->  mx.example.com.
+; and make sure MAIL_HOSTNAME=mx.example.com so HELO, PTR and A all agree.

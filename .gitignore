@@ -1,0 +1,10 @@
+node_modules/
+dist/
+data/
+.env
+test-results/
+playwright-report/
+infra/dev-certs/
+backups/
+*.log
+secrets/

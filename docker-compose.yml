@@ -1,0 +1,176 @@
+# VoidMail local development / test stack.
+#   npm run env:init && docker compose up -d --build
+# Web UI: http://localhost:8080   Mailpit ("the outside world"): http://localhost:8025 (plain) / :8026 (STARTTLS)
+# Inbound SMTP (as a remote server would connect): localhost:2525
+# For production use docker-compose.prod.yml on top of this file (see DEPLOYMENT.md).
+
+x-app: &app
+  build:
+    context: .
+    network: host
+    args:
+      NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c}
+    secrets: [buildca]
+  image: voidmail-app:dev
+  env_file: .env
+  environment: &appenv
+    NODE_ENV: development
+    DATABASE_URL: postgres://${POSTGRES_USER:-voidmail}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-voidmail}
+    SMTP_RELAY_HOST: postfix
+    SMTP_RELAY_PORT: "10025"
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  db:
+    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-voidmail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-voidmail}
+    volumes: [dbdata:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["node", "dist/server/main.js", "migrate"]
+    restart: "no"
+    networks: [backend]
+    depends_on:
+      db: { condition: service_healthy }
+
+  api:
+    <<: *app
+    command: ["node", "dist/server/main.js", "api"]
+    environment:
+      <<: *appenv
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: "8080"
+      # Development stack only: the e2e suite registers many accounts from 127.0.0.1. Remove in production.
+      RATE_LIMIT_MULTIPLIER: "20"
+    volumes: [blobs:/data/blobs]
+    ports: ["127.0.0.1:8080:8080"]
+    networks: [backend, frontend]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mx:
+    <<: *app
+    command: ["node", "dist/server/main.js", "mx"]
+    volumes: [blobs:/data/blobs]
+    networks: [backend]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(2424,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    <<: *app
+    command: ["node", "dist/server/main.js", "worker"]
+    environment:
+      <<: *appenv
+      # Postfix's address on the submission network (the only network allowed to submit).
+      SMTP_RELAY_HOST: 172.30.1.10
+    volumes: [blobs:/data/blobs]
+    # Only the worker is on the submission network, which is the only network Postfix accepts submissions from.
+    networks: [backend, submission]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  postfix:
+    build:
+      context: infra/postfix
+      network: host
+      args:
+        BASE_IMAGE: ${POSTFIX_BASE_IMAGE:-ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-}
+      secrets: [buildca]
+    image: voidmail-postfix:dev
+    environment:
+      MAIL_DOMAIN: ${MAIL_DOMAIN}
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME}
+      SUBMISSION_NETWORK: 172.30.1.0/24
+      MX_BRIDGE_HOST: mx
+      # Development routing: nothing leaves the machine. All remote domains go to the Mailpit sinks.
+      #   tls.example        -> mailpit-tls (offers STARTTLS)
+      #   everything else    -> mailpit     (no TLS)
+      DEFAULT_TRANSPORT: "smtp:[mailpit]:1025"
+      TLSREQ_TRANSPORT: "smtp_tlsreq:"
+      TLSREQ_LEVEL: encrypt
+      EXTRA_TRANSPORTS: "{ tls.example = :[mailpit-tls]:1025 } { * = :[mailpit]:1025 }"
+    ports: ["127.0.0.1:2525:25"]
+    networks:
+      backend: {}
+      submission: { ipv4_address: 172.30.1.10 }
+      external: {}
+    depends_on:
+      mx: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ---- local "outside world" (development only) ----
+  certs:
+    image: voidmail-postfix:dev
+    entrypoint: ["/usr/local/bin/gen-dev-certs.sh", "/certs"]
+    volumes: [devcerts:/certs]
+    restart: "no"
+    depends_on:
+      postfix: { condition: service_started }
+
+  mailpit:
+    image: axllent/mailpit:v1.20@sha256:7eef0f38dbc85e4e264f2edf5d70fbb694826791e05cb2cae4fc9e3282f968f5
+    environment:
+      MP_SMTP_DISABLE_RDNS: "true"
+      # Recipients outside *.example are rejected with 5xx, so bounce handling can be tested end to end.
+      MP_SMTP_ALLOWED_RECIPIENTS: '\.example$'
+    ports: ["127.0.0.1:8025:8025", "127.0.0.1:1025:1025"]
+    networks: [external]
+
+  mailpit-tls:
+    image: axllent/mailpit:v1.20@sha256:7eef0f38dbc85e4e264f2edf5d70fbb694826791e05cb2cae4fc9e3282f968f5
+    environment:
+      MP_SMTP_TLS_CERT: /certs/mailpit-tls.pem
+      MP_SMTP_TLS_KEY: /certs/mailpit-tls.key
+      MP_SMTP_REQUIRE_STARTTLS: "true"
+      MP_SMTP_DISABLE_RDNS: "true"
+    volumes: [devcerts:/certs:ro]
+    ports: ["127.0.0.1:8026:8025"]
+    networks: [external]
+    depends_on:
+      certs: { condition: service_completed_successfully }
+
+networks:
+  frontend: {}
+  backend:
+    internal: true
+  submission:
+    internal: true
+    ipam:
+      config: [{ subnet: 172.30.1.0/24 }]
+  external: {}
+
+secrets:
+  # Only used when building behind a TLS-intercepting proxy; points at an empty file otherwise.
+  buildca:
+    file: ${BUILD_CA_FILE:-./infra/postfix/no-ca.pem}
+
+volumes:
+  dbdata: {}
+  blobs: {}
+  devcerts: {}
